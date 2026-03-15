@@ -12,6 +12,8 @@ if __name__ == "__main__":
     parser.add_argument("--record_video", action="store_true")
     parser.add_argument("--video_path", type=str, 
                         default="videos/example.mp4")
+    parser.add_argument("--loop", action="store_true",
+                        help="Loop motion playback indefinitely")
                         
     args = parser.parse_args()
     
@@ -29,12 +31,21 @@ if __name__ == "__main__":
                             record_video=args.record_video, video_path=args.video_path)
     
     frame_idx = 0
-    while True:
-        env.step(motion_root_pos[frame_idx], 
-                motion_root_rot[frame_idx], 
-                motion_dof_pos[frame_idx], 
-                rate_limit=True)
-        frame_idx += 1
-        if frame_idx >= len(motion_root_pos):
-            frame_idx = 0
-    env.close()
+    if args.loop:
+        # Loop motion playback indefinitely
+        while True:
+            env.step(motion_root_pos[frame_idx],
+                     motion_root_rot[frame_idx],
+                     motion_dof_pos[frame_idx],
+                     rate_limit=True)
+            frame_idx += 1
+            if frame_idx >= len(motion_root_pos):
+                frame_idx = 0
+    else:
+        # Play motion once (useful for clean video export)
+        for frame_idx in range(len(motion_root_pos)):
+            env.step(motion_root_pos[frame_idx],
+                     motion_root_rot[frame_idx],
+                     motion_dof_pos[frame_idx],
+                     rate_limit=True)
+        env.close()

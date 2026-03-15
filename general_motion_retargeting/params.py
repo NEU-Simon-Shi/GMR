@@ -23,6 +23,7 @@ ROBOT_XML_DICT = {
     "tienkung": ASSET_ROOT / "tienkung" / "mjcf" / "tienkung.xml",
     "pal_talos": ASSET_ROOT / "pal_talos" / "talos.xml",
     "fourier_gr3": ASSET_ROOT / "fourier_gr3v2_1_1" / "mjcf" / "gr3v2_1_1_dummy_hand.xml",
+    "nao": ASSET_ROOT / "nao" / "nao_scene.xml",
 }
 
 IK_CONFIG_DICT = {
@@ -45,6 +46,7 @@ IK_CONFIG_DICT = {
         "pnd_adam_lite": IK_CONFIG_ROOT / "smplx_to_adam.json",
         "tienkung": IK_CONFIG_ROOT / "smplx_to_tienkung.json",
         "fourier_gr3": IK_CONFIG_ROOT / "smplx_to_gr3.json",
+        "nao": IK_CONFIG_ROOT / "smplx_to_nao.json",
     },
     "bvh_lafan1":{
         "unitree_g1": IK_CONFIG_ROOT / "bvh_lafan1_to_g1.json",
@@ -95,6 +97,7 @@ ROBOT_BASE_DICT = {
     "tienkung": "Base_link",
     "pal_talos": "base_link",
     "fourier_gr3": "base_link",
+    "nao": "torso",
 }
 
 VIEWER_CAM_DISTANCE_DICT = {
@@ -116,4 +119,5 @@ VIEWER_CAM_DISTANCE_DICT = {
     "tienkung": 3.0,
     "pal_talos": 3.0,
     "fourier_gr3": 2.0,
+    "nao": 1.5,
 }
