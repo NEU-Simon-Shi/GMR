@@ -1,4 +1,6 @@
 import argparse
+import pickle
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +121,7 @@ def run_retarget(
     robot: str,
     save_path: Path,
     rate_limit: bool,
+    headless: bool,
 ) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -133,9 +136,129 @@ def run_retarget(
     ]
     if rate_limit:
         cmd.append("--rate_limit")
+    if headless:
+        cmd.append("--headless")
 
     print(f"[RUN] {' '.join(cmd)}")
     subprocess.run(cmd, cwd=str(repo_root), check=True)
+
+
+def _load_amass_compatible_arrays(npz_path: Path) -> dict[str, np.ndarray]:
+    with np.load(npz_path, allow_pickle=True) as data:
+        return {key: data[key] for key in data.files}
+
+
+def _save_amass_compatible_arrays(path: Path, arrays: dict[str, np.ndarray]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **arrays)
+
+
+def _split_amass_compatible_file(
+    smplx_file: Path,
+    chunk_size: int,
+) -> list[Path]:
+    if chunk_size < 2:
+        raise ValueError(f"chunk_size must be at least 2 to avoid single-frame chunks, got {chunk_size}")
+
+    arrays = _load_amass_compatible_arrays(smplx_file)
+    num_frames = int(arrays["trans"].shape[0])
+    if num_frames <= chunk_size:
+        return [smplx_file]
+
+    chunk_paths: list[Path] = []
+    chunk_root = smplx_file.parent / "_chunks" / smplx_file.stem
+    start = 0
+    while start < num_frames:
+        end = min(num_frames, start + chunk_size)
+        remaining = num_frames - end
+        # Avoid creating a final chunk with only one frame; fold that frame into the current chunk.
+        if remaining == 1:
+            end = num_frames
+        chunk_arrays: dict[str, np.ndarray] = {}
+        for key, value in arrays.items():
+            array = np.asarray(value)
+            if array.ndim >= 1 and array.shape[0] == num_frames:
+                chunk_arrays[key] = array[start:end]
+            else:
+                chunk_arrays[key] = array
+        chunk_path = chunk_root / f"{smplx_file.stem}_chunk_{start:06d}_{end:06d}.npz"
+        _save_amass_compatible_arrays(chunk_path, chunk_arrays)
+        chunk_paths.append(chunk_path)
+        start = end
+    return chunk_paths
+
+
+def _merge_retargeted_pkls(chunk_save_paths: list[Path], final_save_path: Path) -> None:
+    if not chunk_save_paths:
+        raise ValueError("chunk_save_paths must not be empty.")
+
+    merged: dict[str, object] | None = None
+    root_pos_parts = []
+    root_rot_parts = []
+    dof_pos_parts = []
+
+    for chunk_path in chunk_save_paths:
+        with chunk_path.open("rb") as f:
+            motion_data = pickle.load(f)
+        if merged is None:
+            merged = {
+                "fps": motion_data["fps"],
+                "local_body_pos": motion_data.get("local_body_pos"),
+                "link_body_list": motion_data.get("link_body_list"),
+            }
+        root_pos_parts.append(np.asarray(motion_data["root_pos"], dtype=np.float32))
+        root_rot_parts.append(np.asarray(motion_data["root_rot"], dtype=np.float32))
+        dof_pos_parts.append(np.asarray(motion_data["dof_pos"], dtype=np.float32))
+
+    assert merged is not None
+    merged["root_pos"] = np.concatenate(root_pos_parts, axis=0)
+    merged["root_rot"] = np.concatenate(root_rot_parts, axis=0)
+    merged["dof_pos"] = np.concatenate(dof_pos_parts, axis=0)
+
+    final_save_path.parent.mkdir(parents=True, exist_ok=True)
+    with final_save_path.open("wb") as f:
+        pickle.dump(merged, f)
+    print(f"[MERGED] Saved merged retargeted motion to {final_save_path}")
+
+
+def _get_num_frames_from_amass_compatible(npz_path: Path) -> int:
+    with np.load(npz_path, allow_pickle=True) as data:
+        return int(np.asarray(data["trans"]).shape[0])
+
+
+def _get_num_frames_from_retargeted_pkl(pkl_path: Path) -> int:
+    with pkl_path.open("rb") as f:
+        motion_data = pickle.load(f)
+    return int(np.asarray(motion_data["root_pos"]).shape[0])
+
+
+def _validate_retargeted_frame_count(
+    smplx_file: Path,
+    retargeted_pkl: Path,
+) -> None:
+    expected = _get_num_frames_from_amass_compatible(smplx_file)
+    actual = _get_num_frames_from_retargeted_pkl(retargeted_pkl)
+    if expected != actual:
+        raise RuntimeError(
+            f"Frame count mismatch after retargeting {smplx_file}: "
+            f"expected {expected} frames, got {actual} in {retargeted_pkl}"
+        )
+
+
+def _cleanup_chunk_artifacts(chunk_files: list[Path], chunk_save_paths: list[Path]) -> None:
+    for chunk_path in chunk_files:
+        if chunk_path.exists():
+            chunk_path.unlink()
+    for chunk_save_path in chunk_save_paths:
+        if chunk_save_path.exists():
+            chunk_save_path.unlink()
+
+    for root in {
+        *(chunk_path.parent for chunk_path in chunk_files),
+        *(chunk_save_path.parent for chunk_save_path in chunk_save_paths),
+    }:
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def main() -> None:
@@ -184,6 +307,17 @@ def main() -> None:
         default="z",
         help="Up axis of source motions before conversion (default: z). Use y for Y-up datasets.",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run retargeting without creating a viewer. Useful for batch conversion on machines without DISPLAY.",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=None,
+        help="Optional frame chunk size for very long sequences. Chunks are retargeted separately then merged back to one final pkl.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -215,14 +349,38 @@ def main() -> None:
             converted_path=converted_path,
             source_up_axis=args.source_up_axis,
         )
+        chunk_files = [smplx_file]
+        if args.chunk_size is not None:
+            chunk_files = _split_amass_compatible_file(smplx_file, args.chunk_size)
 
-        run_retarget(
-            repo_root=repo_root,
-            smplx_file=smplx_file,
-            robot=args.robot,
-            save_path=save_path,
-            rate_limit=args.rate_limit,
-        )
+        if len(chunk_files) == 1:
+            run_retarget(
+                repo_root=repo_root,
+                smplx_file=chunk_files[0],
+                robot=args.robot,
+                save_path=save_path,
+                rate_limit=args.rate_limit,
+                headless=args.headless,
+            )
+            _validate_retargeted_frame_count(chunk_files[0], save_path)
+            continue
+
+        chunk_save_paths: list[Path] = []
+        for chunk_file in chunk_files:
+            chunk_save_path = save_path.parent / "_chunks" / f"{chunk_file.stem}_{args.robot}.pkl"
+            run_retarget(
+                repo_root=repo_root,
+                smplx_file=chunk_file,
+                robot=args.robot,
+                save_path=chunk_save_path,
+                rate_limit=args.rate_limit,
+                headless=args.headless,
+            )
+            _validate_retargeted_frame_count(chunk_file, chunk_save_path)
+            chunk_save_paths.append(chunk_save_path)
+        _merge_retargeted_pkls(chunk_save_paths, save_path)
+        _validate_retargeted_frame_count(smplx_file, save_path)
+        _cleanup_chunk_artifacts(chunk_files, chunk_save_paths)
 
     print(f"[DONE] Retargeted files are saved under: {save_root}")
 
